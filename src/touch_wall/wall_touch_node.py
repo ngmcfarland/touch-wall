@@ -142,7 +142,7 @@ def update_touch_states(raw_values):
 def main():
     import board
     import touchio
-    from digitalio import DigitalInOut, Direction
+    from digitalio import DigitalInOut, Direction, Pull
     import adafruit_pio_uart
 
     global baseline_values
@@ -170,8 +170,8 @@ def main():
     rs485_direction.direction = Direction.OUTPUT
     rs485_direction.value = not RS485_TX_ENABLE_LEVEL
 
-    touch_a = touchio.TouchIn(board.GP10, pull=touchio.Pull.UP)
-    touch_b = touchio.TouchIn(board.GP11, pull=touchio.Pull.UP)
+    touch_a = touchio.TouchIn(board.GP10, pull=Pull.UP)
+    touch_b = touchio.TouchIn(board.GP11, pull=Pull.UP)
     touch_inputs = (touch_a, touch_b)
 
     uart = adafruit_pio_uart.UART(
