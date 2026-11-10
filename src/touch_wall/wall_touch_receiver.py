@@ -10,11 +10,13 @@ Example:
 """
 
 import argparse
+import os
 import sys
 import time
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import serial
+from dotenv import load_dotenv
 from pythonosc.udp_client import SimpleUDPClient
 
 
@@ -134,9 +136,7 @@ class WallState:
         expected: int = expected_sensor_count(board_id)
         if len(local_states) != expected:
             raise ValueError(
-                "board {} reported {} sensors; expected {}".format(
-                    board_id, len(local_states), expected
-                )
+                f"board {board_id} reported {len(local_states)} sensors; expected {expected}"
             )
 
         first_sensor: int = first_global_sensor(board_id)
@@ -163,11 +163,21 @@ def poll_board(
     written: int = port.write(request)  # type: ignore
     if written != len(request):
         raise IOError(
-            "Serial write incomplete for board {} ({} of {} bytes)".format(
-                board_id, written, len(request)
-            )
+            f"Serial write incomplete for board {board_id} ({written} of {len(request)} bytes)"
         )
     return read_state_response(port, board_id, response_timeout)
+
+
+def parse_bool(value: str) -> bool:
+    """Parse a boolean command-line or environment value."""
+    normalized: str = value.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    raise argparse.ArgumentTypeError(
+        "expected a boolean value (true/false, yes/no, on/off, or 1/0)"
+    )
 
 
 def run(
@@ -175,8 +185,9 @@ def run(
     osc_host: str,
     osc_port: int,
     response_timeout: float,
+    send_osc: bool = True,
 ) -> None:
-    """Continuously poll every board and emit per-sensor OSC touch deltas."""
+    """Continuously poll every board and optionally emit per-sensor OSC deltas."""
     wall = WallState()
 
     with SimpleUDPClient(osc_host, osc_port) as osc_client, serial.Serial(
@@ -185,58 +196,86 @@ def run(
         timeout=0.01,
         write_timeout=1,
     ) as port:
-        print(
-            "Polling {} at {} baud; sending OSC deltas to {}:{}".format(
-                port_name, UART_BAUDRATE, osc_host, osc_port
-            )
-        )
+        print(f"Polling {port_name} at {UART_BAUDRATE} baud;")
+        if send_osc:
+            print(f"Sending OSC deltas to {osc_host}:{osc_port}")
+        else:
+            print("OSC sending disabled")
 
         while True:
             for board_id in range(BOARD_COUNT):
                 response = poll_board(port, board_id, response_timeout)
                 if response is None:
                     print(
-                        "No valid response from board {}".format(board_id),
+                        f"No valid response from board {board_id}",
                         file=sys.stderr,
                     )
                     continue
 
                 sequence, local_states = response
                 first_update: bool = not wall.initialized_boards[board_id]
-                changes: List[Tuple[int, bool]] = wall.update_board(board_id, local_states)
+                changes: List[Tuple[int, bool]] = wall.update_board(
+                    board_id, local_states
+                )
                 for sensor_index, touched in changes:
-                    osc_client.send_message(  # type: ignore[no-untyped-call]
-                        "/touch/{}".format(sensor_index),
-                        1 if touched else 0,
-                    )
+                    value = 1 if touched else 0
+                    if send_osc:
+                        osc_client.send_message(  # type: ignore[no-untyped-call]
+                            f"/touch/{sensor_index}",
+                            value,
+                        )
+                    else:
+                        print(f"/touch/{sensor_index} {value}")
 
                 if first_update:
-                    print(
-                        "Board {} initialized (sequence {})".format(
-                            board_id, sequence
-                        )
-                    )
+                    print(f"Board {board_id} initialized (sequence {sequence})")
 
 
-def main() -> None:
-    """Parse command-line arguments and start the wall receiver loop."""
+def build_parser() -> argparse.ArgumentParser:
+    """Create the command-line parser, using environment variables as defaults."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--port",
-        required=True,
+        default=os.getenv("TOUCH_WALL_PORT"),
         help="USB serial port, e.g. COM3 or /dev/ttyUSB0",
     )
-    parser.add_argument("--baudrate", type=int, default=UART_BAUDRATE)
-    parser.add_argument("--osc-host", default="127.0.0.1")
-    parser.add_argument("--osc-port", type=int, default=9000)
+    parser.add_argument(
+        "--baudrate",
+        type=int,
+        default=os.getenv("TOUCH_WALL_BAUDRATE", str(UART_BAUDRATE)),
+    )
+    parser.add_argument(
+        "--osc-host", default=os.getenv("TOUCH_WALL_OSC_HOST", "127.0.0.1")
+    )
+    parser.add_argument(
+        "--osc-port",
+        type=int,
+        default=os.getenv("TOUCH_WALL_OSC_PORT", "9000"),
+    )
     parser.add_argument(
         "--response-timeout",
         type=float,
-        default=0.25,
+        default=os.getenv("TOUCH_WALL_RESPONSE_TIMEOUT", "0.25"),
         help="Seconds to wait for each board response",
     )
+    parser.add_argument(
+        "--send-osc",
+        type=parse_bool,
+        default=os.getenv("TOUCH_WALL_SEND_OSC", "true"),
+        metavar="BOOL",
+        help="Send OSC messages (true/false; default: true)",
+    )
+    return parser
+
+
+def main() -> None:
+    """Parse configuration and start the wall receiver loop."""
+    load_dotenv()
+    parser = build_parser()
     args = parser.parse_args()
 
+    if args.port is None:
+        parser.error("provide --port or set TOUCH_WALL_PORT in .env")
     if args.baudrate != UART_BAUDRATE:
         parser.error("baudrate must match the node firmware (115200)")
     if not 0 < args.osc_port <= 65535:
@@ -244,7 +283,13 @@ def main() -> None:
     if args.response_timeout <= 0:
         parser.error("response-timeout must be greater than zero")
 
-    run(args.port, args.osc_host, args.osc_port, args.response_timeout)
+    run(
+        args.port,
+        args.osc_host,
+        args.osc_port,
+        args.response_timeout,
+        args.send_osc,
+    )
 
 
 if __name__ == "__main__":
