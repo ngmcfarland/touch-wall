@@ -1,4 +1,6 @@
+import os
 import unittest
+from unittest.mock import Mock, patch
 
 from touch_wall import wall_touch_receiver as receiver
 
@@ -43,6 +45,74 @@ def state_frame(
 
 
 class ReceiverTests(unittest.TestCase):
+    def test_parser_uses_environment_defaults_and_cli_overrides(self):
+        config = {
+            "TOUCH_WALL_PORT": "/dev/ttyUSB1",
+            "TOUCH_WALL_BAUDRATE": "115200",
+            "TOUCH_WALL_OSC_HOST": "192.168.1.10",
+            "TOUCH_WALL_OSC_PORT": "9001",
+            "TOUCH_WALL_RESPONSE_TIMEOUT": "0.5",
+            "TOUCH_WALL_SEND_OSC": "false",
+        }
+        with patch.dict(os.environ, config):
+            args = receiver.build_parser().parse_args([])
+            self.assertEqual(args.port, "/dev/ttyUSB1")
+            self.assertEqual(args.baudrate, 115200)
+            self.assertEqual(args.osc_host, "192.168.1.10")
+            self.assertEqual(args.osc_port, 9001)
+            self.assertEqual(args.response_timeout, 0.5)
+            self.assertFalse(args.send_osc)
+
+            args = receiver.build_parser().parse_args(
+                [
+                    "--port",
+                    "/dev/ttyUSB2",
+                    "--osc-port",
+                    "9002",
+                    "--send-osc",
+                    "yes",
+                ]
+            )
+            self.assertEqual(args.port, "/dev/ttyUSB2")
+            self.assertEqual(args.osc_port, 9002)
+            self.assertTrue(args.send_osc)
+
+    def test_parser_defaults_osc_sending(self):
+        with patch.dict(os.environ, {}, clear=True):
+            args = receiver.build_parser().parse_args([])
+        self.assertTrue(args.send_osc)
+
+    def test_parser_rejects_invalid_send_osc_value(self):
+        with self.assertRaises(SystemExit):
+            receiver.build_parser().parse_args(["--send-osc", "sometimes"])
+
+    def test_run_polls_every_board_without_sending_osc_when_disabled(self):
+        osc_client = Mock()
+        osc_client.__enter__ = Mock(return_value=osc_client)
+        osc_client.__exit__ = Mock(return_value=None)
+        port = Mock()
+        port.__enter__ = Mock(return_value=port)
+        port.__exit__ = Mock(return_value=None)
+
+        with (
+            patch.object(receiver, "SimpleUDPClient", return_value=osc_client),
+            patch.object(receiver.serial, "Serial", return_value=port),
+            patch.object(receiver, "BOARD_COUNT", 2),
+            patch.object(
+                receiver,
+                "poll_board",
+                side_effect=[(1, [True] * 24), (1, [True] * 24), KeyboardInterrupt],
+            ) as poll_board,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                receiver.run("/dev/ttyUSB0", "127.0.0.1", 9000, 0.1, False)
+
+        self.assertEqual(
+            [call.args[1] for call in poll_board.call_args_list],
+            [0, 1, 0],
+        )
+        osc_client.send_message.assert_not_called()
+
     def test_crc_and_poll_request(self):
         self.assertEqual(receiver.crc8(b"123456789"), 0xF4)
         self.assertEqual(

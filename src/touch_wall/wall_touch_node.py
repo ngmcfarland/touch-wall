@@ -6,10 +6,10 @@ BOARD_ID = 0
 SENSOR_COUNT = 16 if BOARD_ID == 23 else 24
 
 # Tune these values after measuring raw_value on the installed wall.
-TOUCH_ON_RATIO = 1.10
+TOUCH_ON_RATIO = 1.20
 TOUCH_OFF_RATIO = 1.06
 BASELINE_ALPHA = 0.01
-MUX_SETTLE_SECONDS = 0.001
+MUX_SETTLE_SECONDS = 0.01
 
 UART_BAUDRATE = 115200
 # Confirm the breakout's RTS polarity; true means GP2 high while transmitting.
@@ -96,18 +96,20 @@ request_buffer = bytearray()
 
 
 def handle_request_byte(value):
+    global request_buffer
     request_buffer.append(value)
     while len(request_buffer) >= 4:
         if request_buffer[0] != SOF:
-            del request_buffer[0]
+            request_buffer = request_buffer[1:]
             continue
 
         request = request_buffer[:4]
         if request[1] != POLL_COMMAND or request[3] != crc8(request[1:3]):
-            del request_buffer[0]
+            request_buffer = request_buffer[1:]
             continue
 
-        del request_buffer[:4]
+        # Slice the buffer to remove the processed 4-byte request
+        request_buffer = request_buffer[4:]
         if request[2] == BOARD_ID:
             send_state()
 
@@ -139,9 +141,9 @@ def update_touch_states(raw_values):
 
 def main():
     import board
-    import busio
     import touchio
     from digitalio import DigitalInOut, Direction
+    import adafruit_pio_uart
 
     global baseline_values
     global rs485_direction
@@ -150,6 +152,9 @@ def main():
     global touch_inputs
     global touch_states
     global uart
+
+    led = DigitalInOut(board.LED)
+    led.direction = Direction.OUTPUT
 
     # Both multiplexers share their address/select lines.
     select_pins = [
@@ -169,12 +174,11 @@ def main():
     touch_b = touchio.TouchIn(board.GP11, pull=touchio.Pull.UP)
     touch_inputs = (touch_a, touch_b)
 
-    uart = busio.UART(
-        board.GP0,
-        board.GP1,
+    uart = adafruit_pio_uart.UART(
+        tx=board.GP1,
+        rx=board.GP0,
         baudrate=UART_BAUDRATE,
         timeout=0,
-        receiver_buffer_size=64,
     )
 
     # Request:  A5 01 board_id crc8(command, board_id)
@@ -186,6 +190,11 @@ def main():
     touch_states = [False] * SENSOR_COUNT
     # Start with every pad untouched so each sensor gets an unpressed baseline.
     baseline_values = [max(value, 1) for value in read_raw_values()]
+
+    # Flash the LED to signal the board is ready
+    led.value = True
+    time.sleep(0.5)
+    led.value = False
 
     while True:
         raw_values = read_raw_values()
