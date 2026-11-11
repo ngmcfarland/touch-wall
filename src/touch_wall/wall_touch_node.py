@@ -1,15 +1,14 @@
 import time
 
 
-# Assign IDs 0-23, one per PCB. By default, board 23 is the 16-sensor board.
 BOARD_ID = 0
-SENSOR_COUNT = 16 if BOARD_ID == 23 else 24
+SENSOR_COUNT = 24  # Half on one MUX and half on the other
 
 # Tune these values after measuring raw_value on the installed wall.
-TOUCH_ON_RATIO = 1.20
-TOUCH_OFF_RATIO = 1.06
+TOUCH_ON_RATIO = 1.5
+TOUCH_OFF_RATIO = 1.1
 BASELINE_ALPHA = 0.01
-MUX_SETTLE_SECONDS = 0.01
+MUX_SETTLE_SECONDS = 0.005
 
 UART_BAUDRATE = 115200
 # Confirm the breakout's RTS polarity; true means GP2 high while transmitting.
@@ -27,8 +26,8 @@ PAYLOAD_SIZE = (SENSOR_COUNT + 7) // 8
 
 if not 0 <= BOARD_ID <= 23:
     raise ValueError("BOARD_ID must be between 0 and 23")
-if SENSOR_COUNT not in (16, 24) or SENSOR_COUNT % 2:
-    raise ValueError("SENSOR_COUNT must be 16 or 24")
+if SENSOR_COUNT < 2 or SENSOR_COUNT > 32 or SENSOR_COUNT % 2:
+    raise ValueError("SENSOR_COUNT must be even and between 2 and 32")
 if not 0 < TOUCH_OFF_RATIO <= TOUCH_ON_RATIO:
     raise ValueError("Touch ratios must satisfy 0 < OFF <= ON")
 
@@ -38,17 +37,6 @@ def set_mux_channel(channel):
     select_pins[1].value = bool(channel & 0x02)
     select_pins[2].value = bool(channel & 0x04)
     select_pins[3].value = bool(channel & 0x08)
-
-
-def read_raw_values():
-    values = [0] * SENSOR_COUNT
-    for mux_index, touch_input in enumerate(touch_inputs):
-        first_sensor = mux_index * SENSORS_PER_MUX
-        for channel in range(SENSORS_PER_MUX):
-            set_mux_channel(channel)
-            time.sleep(MUX_SETTLE_SECONDS)
-            values[first_sensor + channel] = touch_input.raw_value
-    return values
 
 
 def crc8(data):
@@ -121,22 +109,38 @@ def service_uart():
             handle_request_byte(received[0])
 
 
-def update_touch_states(raw_values):
-    for sensor_index, raw_value in enumerate(raw_values):
-        baseline = baseline_values[sensor_index]
-        was_touched = touch_states[sensor_index]
+def update_touch_state_for_index(raw_value, idx):
+    baseline = baseline_values[idx]
+    was_touched = touch_states[idx]
 
-        if was_touched:
-            touched = raw_value / baseline >= TOUCH_OFF_RATIO
-        else:
-            touched = raw_value / baseline >= TOUCH_ON_RATIO
+    if was_touched:
+        touched = raw_value / baseline >= TOUCH_OFF_RATIO
+    else:
+        touched = raw_value / baseline >= TOUCH_ON_RATIO
 
-        touch_states[sensor_index] = touched
-        if not touched:
-            baseline_values[sensor_index] = max(
-                1,
-                int(baseline + (raw_value - baseline) * BASELINE_ALPHA),
-            )
+    touch_states[idx] = touched
+    if not touched:
+        baseline_values[idx] = max(
+            1,
+            int(baseline + (raw_value - baseline) * BASELINE_ALPHA),
+        )
+
+
+def handle_loop() -> None:
+    for channel in range(SENSORS_PER_MUX):
+        set_mux_channel(channel)
+        time.sleep(MUX_SETTLE_SECONDS)
+        # Read and update the touch states for both MUX inputs
+        update_touch_state_for_index(
+            raw_value=touch_inputs[0].raw_value,
+            idx=channel,
+        )
+        update_touch_state_for_index(
+            raw_value=touch_inputs[1].raw_value,
+            idx=channel + SENSORS_PER_MUX,
+        )
+        # Check for RS-485 message
+        service_uart()
 
 
 def main():
@@ -189,7 +193,12 @@ def main():
     sequence_number = 0
     touch_states = [False] * SENSOR_COUNT
     # Start with every pad untouched so each sensor gets an unpressed baseline.
-    baseline_values = [max(value, 1) for value in read_raw_values()]
+    baseline_values = [0] * SENSOR_COUNT
+    for channel in range(SENSORS_PER_MUX):
+        set_mux_channel(channel)
+        time.sleep(MUX_SETTLE_SECONDS * 2)  # Extra settle time for baseline
+        baseline_values[channel] = max(touch_inputs[0].raw_value, 1)
+        baseline_values[channel + SENSORS_PER_MUX] = max(touch_inputs[1].raw_value, 1)
 
     # Flash the LED to signal the board is ready
     led.value = True
@@ -197,9 +206,7 @@ def main():
     led.value = False
 
     while True:
-        raw_values = read_raw_values()
-        update_touch_states(raw_values)
-        service_uart()
+        handle_loop()
 
 
 if __name__ == "__main__":
