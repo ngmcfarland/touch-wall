@@ -2,11 +2,10 @@
 """Poll touch nodes, maintain the 568-sensor wall state, and publish OSC deltas.
 
 Install dependencies with:
-    python -m pip install pyserial python-osc
+    uv sync
 
 Example:
-    python wall_touch_receiver.py --port /dev/ttyUSB0 \
-        --osc-host 127.0.0.1 --osc-port 9000
+    uv run python src/touch_wall/wall_touch_receiver.py
 """
 
 import argparse

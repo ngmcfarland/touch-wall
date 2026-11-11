@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from touch_wall import wall_touch_node as node
 
@@ -59,40 +59,71 @@ class NodeTests(unittest.TestCase):
             [pin.value for pin in node.select_pins], [False, True, False, True]
         )
 
-    def test_read_raw_values_reads_both_muxes_in_sensor_order(self):
-        node.touch_inputs = (Mock(), Mock())
-        node.touch_inputs[0].raw_value = 10
-        node.touch_inputs[1].raw_value = 20
-        with patch.object(node.time, "sleep") as sleep:
-            values = node.read_raw_values()
+    def test_handle_loop_reads_both_muxes_and_services_uart_per_channel(self):
+        node.touch_inputs = (Mock(raw_value=120), Mock(raw_value=90))
+        update = Mock()
+        with (
+            patch.object(node, "set_mux_channel") as set_channel,
+            patch.object(node, "update_touch_state_for_index", update),
+            patch.object(node, "service_uart") as service_uart,
+            patch.object(node.time, "sleep") as sleep,
+        ):
+            node.handle_loop()
 
-        self.assertEqual(values[:node.SENSORS_PER_MUX], [10] * node.SENSORS_PER_MUX)
-        self.assertEqual(values[node.SENSORS_PER_MUX:], [20] * node.SENSORS_PER_MUX)
-        self.assertEqual(sleep.call_count, node.SENSOR_COUNT)
+        self.assertEqual(
+            set_channel.call_args_list,
+            [call(channel) for channel in range(node.SENSORS_PER_MUX)],
+        )
+        self.assertEqual(
+            update.call_args_list,
+            [
+                expected_call
+                for channel in range(node.SENSORS_PER_MUX)
+                for expected_call in (
+                    call(raw_value=120, idx=channel),
+                    call(raw_value=90, idx=channel + node.SENSORS_PER_MUX),
+                )
+            ],
+        )
+        self.assertEqual(service_uart.call_count, node.SENSORS_PER_MUX)
+        self.assertEqual(sleep.call_count, node.SENSORS_PER_MUX)
+        sleep.assert_called_with(node.MUX_SETTLE_SECONDS)
 
     def test_touch_thresholds_hysteresis_and_baseline_adaptation(self):
         node.baseline_values = [100] * node.SENSOR_COUNT
-        readings = [110, 90] + [99] * (node.SENSOR_COUNT - 2)
 
-        node.update_touch_states(readings)
-        self.assertTrue(node.touch_states[0])
-        self.assertFalse(node.touch_states[1])
-        self.assertEqual(node.baseline_values[1], 99)
-
-        readings[0] = 106
-        node.update_touch_states(readings)
+        node.update_touch_state_for_index(
+            raw_value=100 * node.TOUCH_ON_RATIO,
+            idx=0,
+        )
         self.assertTrue(node.touch_states[0])
 
-        readings[0] = 105
-        node.update_touch_states(readings)
+        node.update_touch_state_for_index(
+            raw_value=100 * node.TOUCH_OFF_RATIO,
+            idx=0,
+        )
+        self.assertTrue(node.touch_states[0])
+        self.assertEqual(node.baseline_values[0], 100)
+
+        node.update_touch_state_for_index(
+            raw_value=100 * node.TOUCH_OFF_RATIO - 1,
+            idx=0,
+        )
         self.assertFalse(node.touch_states[0])
         self.assertEqual(node.baseline_values[0], 100)
 
+        node.update_touch_state_for_index(
+            raw_value=90,
+            idx=1,
+        )
+        self.assertFalse(node.touch_states[1])
+        self.assertEqual(node.baseline_values[1], 99)
+
     def test_baseline_never_falls_below_one(self):
         node.baseline_values = [1] * node.SENSOR_COUNT
-        node.update_touch_states([0] * node.SENSOR_COUNT)
+        node.update_touch_state_for_index(0, 0)
 
-        self.assertEqual(node.baseline_values, [1] * node.SENSOR_COUNT)
+        self.assertEqual(node.baseline_values[0], 1)
 
     def test_send_state_frame_and_sequence_wrap(self):
         node.sequence_number = 255
