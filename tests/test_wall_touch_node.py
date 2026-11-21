@@ -35,22 +35,31 @@ class NodeTests(unittest.TestCase):
         node.rs485_direction = FakePin()
         node.uart = FakeUART()
         node.sequence_number = 0
-        node.touch_states = [False] * node.SENSOR_COUNT
-        node.baseline_values = [100] * node.SENSOR_COUNT
+        node.sensor_values = [0] * node.SENSOR_COUNT
         node.request_buffer.clear()
 
-    def test_crc_and_sensor_packing(self):
-        self.assertEqual(node.crc8(b"123456789"), 0xF4)
-        states = [False] * node.SENSOR_COUNT
-        states[0] = True
-        states[7] = True
-        states[8] = True
-        states[-1] = True
+    def test_normalize_raw_values_clamps_and_scales(self):
+        self.assertEqual(node.normalize_raw_value(1000), 0)
+        self.assertEqual(node.normalize_raw_value(2000), 0)
+        self.assertEqual(node.normalize_raw_value(6000), 8)
+        self.assertEqual(node.normalize_raw_value(10000), 15)
+        self.assertEqual(node.normalize_raw_value(12000), 15)
 
-        payload = node.pack_states(states)
-        self.assertEqual(payload[0], 0b10000001)
-        self.assertEqual(payload[1], 0b00000001)
-        self.assertEqual(payload[-1], 0b10000000)
+    def test_crc_and_sensor_value_packing(self):
+        self.assertEqual(node.crc8(b"123456789"), 0xF4)
+        values = [0] * node.SENSOR_COUNT
+        values[0] = 1
+        values[1] = 15
+        values[2] = 7
+        values[-1] = 8
+
+        payload = node.pack_values(values)
+        self.assertEqual(len(payload), 12)
+        self.assertEqual(payload[0], 0xF1)
+        self.assertEqual(payload[1], 0x07)
+        self.assertEqual(payload[-1], 0x80)
+        with self.assertRaises(ValueError):
+            node.pack_values([16] + [0] * (node.SENSOR_COUNT - 1))
 
     def test_mux_channel_selects_address_bits(self):
         node.set_mux_channel(0b1010)
@@ -64,7 +73,7 @@ class NodeTests(unittest.TestCase):
         update = Mock()
         with (
             patch.object(node, "set_mux_channel") as set_channel,
-            patch.object(node, "update_touch_state_for_index", update),
+            patch.object(node, "update_sensor_value_for_index", update),
             patch.object(node, "service_uart") as service_uart,
             patch.object(node.time, "sleep") as sleep,
         ):
@@ -89,45 +98,13 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(sleep.call_count, node.SENSORS_PER_MUX)
         sleep.assert_called_with(node.MUX_SETTLE_SECONDS)
 
-    def test_touch_thresholds_hysteresis_and_baseline_adaptation(self):
-        node.baseline_values = [100] * node.SENSOR_COUNT
-
-        node.update_touch_state_for_index(
-            raw_value=100 * node.TOUCH_ON_RATIO,
-            idx=0,
-        )
-        self.assertTrue(node.touch_states[0])
-
-        node.update_touch_state_for_index(
-            raw_value=100 * node.TOUCH_OFF_RATIO,
-            idx=0,
-        )
-        self.assertTrue(node.touch_states[0])
-        self.assertEqual(node.baseline_values[0], 100)
-
-        node.update_touch_state_for_index(
-            raw_value=100 * node.TOUCH_OFF_RATIO - 1,
-            idx=0,
-        )
-        self.assertFalse(node.touch_states[0])
-        self.assertEqual(node.baseline_values[0], 100)
-
-        node.update_touch_state_for_index(
-            raw_value=90,
-            idx=1,
-        )
-        self.assertFalse(node.touch_states[1])
-        self.assertEqual(node.baseline_values[1], 99)
-
-    def test_baseline_never_falls_below_one(self):
-        node.baseline_values = [1] * node.SENSOR_COUNT
-        node.update_touch_state_for_index(0, 0)
-
-        self.assertEqual(node.baseline_values[0], 1)
+    def test_sensor_value_updates_without_thresholding(self):
+        node.update_sensor_value_for_index(raw_value=10000, idx=0)
+        self.assertEqual(node.sensor_values[0], 15)
 
     def test_send_state_frame_and_sequence_wrap(self):
         node.sequence_number = 255
-        node.touch_states[0] = True
+        node.sensor_values[0] = 15
         node.send_state()
 
         frame = node.uart.writes[0]
@@ -137,7 +114,8 @@ class NodeTests(unittest.TestCase):
             body[:4],
             bytes((node.STATE_COMMAND, node.BOARD_ID, node.SENSOR_COUNT, 255)),
         )
-        self.assertEqual(body[4], 1)
+        self.assertEqual(len(frame), 19)
+        self.assertEqual(body[4], 0x0F)
         self.assertEqual(frame[-2], node.crc8(body))
         self.assertEqual(frame[-1], node.EOF_MARKER)
         self.assertEqual(node.sequence_number, 0)

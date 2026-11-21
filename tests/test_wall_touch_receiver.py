@@ -101,7 +101,7 @@ class ReceiverTests(unittest.TestCase):
             patch.object(
                 receiver,
                 "poll_board",
-                side_effect=[(1, [True] * 24), (1, [True] * 24), KeyboardInterrupt],
+                side_effect=[(1, [15] * 24), (1, [15] * 24), KeyboardInterrupt],
             ) as poll_board,
         ):
             with self.assertRaises(KeyboardInterrupt):
@@ -132,12 +132,12 @@ class ReceiverTests(unittest.TestCase):
 
     def test_unpack_payload_uses_lsb_first_order(self):
         self.assertEqual(
-            receiver.unpack_state_payload(bytes((0b10000001, 0b00000010)), 10),
-            [True, False, False, False, False, False, False, True, False, True],
+            receiver.unpack_state_payload(bytes((0xF1, 0xA3, 0x75)), 6),
+            [1, 15, 3, 10, 5, 7],
         )
 
     def test_reads_response_after_noise_and_invalid_frame(self):
-        payload = bytes((0b00000101, 0b00000010, 0))
+        payload = bytes((0x21, 0x43, 0x65, 0x87, 0xA9, 0xCB) * 2)
         invalid = state_frame(3, 10, payload, checksum=0)
         valid = state_frame(3, 11, payload)
         port = FakeSerial(b"\x00" + invalid + valid)
@@ -147,8 +147,17 @@ class ReceiverTests(unittest.TestCase):
             (11, receiver.unpack_state_payload(payload, 24)),
         )
 
+    def test_reads_response_for_short_board(self):
+        payload = bytes((0xF1,)) * 8
+        port = FakeSerial(state_frame(23, 4, payload))
+
+        self.assertEqual(
+            receiver.read_state_response(port, 23, 0.1),
+            (4, [1, 15] * 8),
+        )
+
     def test_rejects_wrong_board_and_bad_terminator(self):
-        payload = bytes(3)
+        payload = bytes(12)
         wrong_board = state_frame(4, 1, payload)
         bad_terminator = state_frame(3, 2, payload, end=0)
         port = FakeSerial(wrong_board + bad_terminator)
@@ -156,10 +165,10 @@ class ReceiverTests(unittest.TestCase):
         self.assertIsNone(receiver.read_state_response(port, 3, 0.001))
 
     def test_poll_board_writes_request_and_returns_response(self):
-        payload = bytes(3)
+        payload = bytes(12)
         port = FakeSerial(state_frame(2, 7, payload))
 
-        self.assertEqual(receiver.poll_board(port, 2, 0.1), (7, [False] * 24))
+        self.assertEqual(receiver.poll_board(port, 2, 0.1), (7, [0] * 24))
         self.assertEqual(port.writes, [receiver.pack_poll_request(2)])
 
     def test_poll_board_reports_incomplete_write(self):
@@ -171,19 +180,24 @@ class ReceiverTests(unittest.TestCase):
     def test_wall_state_initializes_board_and_reports_only_changes(self):
         wall = receiver.WallState()
         self.assertEqual(
-            wall.update_board(23, [False] * 16),
-            [(index, False) for index in range(552, 568)],
+            wall.update_board(23, [0] * 16),
+            [(index, 0) for index in range(552, 568)],
         )
-        self.assertEqual(wall.update_board(23, [False] * 16), [])
+        self.assertEqual(wall.update_board(23, [0] * 16), [])
 
-        local_states = [False] * 24
-        local_states[0] = True
-        changes = wall.update_board(22, local_states)
-        self.assertEqual(changes[0], (528, True))
-        self.assertEqual(changes[1:], [(index, False) for index in range(529, 552)])
-        self.assertTrue(wall.states[528])
+        local_values = [0] * 24
+        local_values[0] = 12
+        changes = wall.update_board(22, local_values)
+        self.assertEqual(changes[0], (528, 12))
+        self.assertEqual(changes[1:], [(index, 0) for index in range(529, 552)])
+        self.assertEqual(wall.states[528], 12)
         with self.assertRaises(ValueError):
-            wall.update_board(23, [False] * 24)
+            wall.update_board(23, [0] * 24)
+
+    def test_wall_state_rejects_out_of_range_normalized_values(self):
+        wall = receiver.WallState()
+        with self.assertRaises(ValueError):
+            wall.update_board(0, [16] + [0] * 23)
 
 
 if __name__ == "__main__":
