@@ -4,10 +4,9 @@ import time
 BOARD_ID = 0
 SENSOR_COUNT = 24  # Half on one MUX and half on the other
 
-# Tune these values after measuring raw_value on the installed wall.
-TOUCH_ON_RATIO = 1.5
-TOUCH_OFF_RATIO = 1.1
-BASELINE_ALPHA = 0.01
+RAW_VALUE_MIN = 2000
+RAW_VALUE_MAX = 10000
+NORMALIZED_VALUE_MAX = 15
 MUX_SETTLE_SECONDS = 0.005
 
 UART_BAUDRATE = 115200
@@ -22,14 +21,12 @@ POLL_COMMAND = 0x01
 STATE_COMMAND = 0x81
 
 SENSORS_PER_MUX = SENSOR_COUNT // 2
-PAYLOAD_SIZE = (SENSOR_COUNT + 7) // 8
+PAYLOAD_SIZE = (SENSOR_COUNT + 1) // 2
 
 if not 0 <= BOARD_ID <= 23:
     raise ValueError("BOARD_ID must be between 0 and 23")
 if SENSOR_COUNT < 2 or SENSOR_COUNT > 32 or SENSOR_COUNT % 2:
     raise ValueError("SENSOR_COUNT must be even and between 2 and 32")
-if not 0 < TOUCH_OFF_RATIO <= TOUCH_ON_RATIO:
-    raise ValueError("Touch ratios must satisfy 0 < OFF <= ON")
 
 
 def set_mux_channel(channel):
@@ -51,11 +48,20 @@ def crc8(data):
     return crc
 
 
-def pack_states(states):
+def normalize_raw_value(raw_value):
+    clamped_value = min(max(raw_value, RAW_VALUE_MIN), RAW_VALUE_MAX)
+    raw_range = RAW_VALUE_MAX - RAW_VALUE_MIN
+    return (
+        (clamped_value - RAW_VALUE_MIN) * NORMALIZED_VALUE_MAX + raw_range // 2
+    ) // raw_range
+
+
+def pack_values(values):
     payload = bytearray(PAYLOAD_SIZE)
-    for sensor_index, touched in enumerate(states):
-        if touched:
-            payload[sensor_index // 8] |= 1 << (sensor_index % 8)
+    for sensor_index, value in enumerate(values):
+        if not 0 <= value <= NORMALIZED_VALUE_MAX:
+            raise ValueError("sensor values must be between 0 and 15")
+        payload[sensor_index // 2] |= value << (4 * (sensor_index % 2))
     return payload
 
 
@@ -63,7 +69,7 @@ def send_state():
     global sequence_number
 
     body = bytearray((STATE_COMMAND, BOARD_ID, SENSOR_COUNT, sequence_number))
-    body.extend(pack_states(touch_states))
+    body.extend(pack_values(sensor_values))
 
     frame = bytearray((SOF,))
     frame.extend(body)
@@ -109,33 +115,20 @@ def service_uart():
             handle_request_byte(received[0])
 
 
-def update_touch_state_for_index(raw_value, idx):
-    baseline = baseline_values[idx]
-    was_touched = touch_states[idx]
-
-    if was_touched:
-        touched = raw_value / baseline >= TOUCH_OFF_RATIO
-    else:
-        touched = raw_value / baseline >= TOUCH_ON_RATIO
-
-    touch_states[idx] = touched
-    if not touched:
-        baseline_values[idx] = max(
-            1,
-            int(baseline + (raw_value - baseline) * BASELINE_ALPHA),
-        )
+def update_sensor_value_for_index(raw_value, idx):
+    sensor_values[idx] = normalize_raw_value(raw_value)
 
 
 def handle_loop() -> None:
     for channel in range(SENSORS_PER_MUX):
         set_mux_channel(channel)
         time.sleep(MUX_SETTLE_SECONDS)
-        # Read and update the touch states for both MUX inputs
-        update_touch_state_for_index(
+        # Read and update the normalized values for both MUX inputs
+        update_sensor_value_for_index(
             raw_value=touch_inputs[0].raw_value,
             idx=channel,
         )
-        update_touch_state_for_index(
+        update_sensor_value_for_index(
             raw_value=touch_inputs[1].raw_value,
             idx=channel + SENSORS_PER_MUX,
         )
@@ -149,12 +142,11 @@ def main():
     from digitalio import DigitalInOut, Direction, Pull
     import adafruit_pio_uart
 
-    global baseline_values
     global rs485_direction
     global select_pins
     global sequence_number
     global touch_inputs
-    global touch_states
+    global sensor_values
     global uart
 
     led = DigitalInOut(board.LED)
@@ -187,18 +179,11 @@ def main():
 
     # Request:  A5 01 board_id crc8(command, board_id)
     # Response: A5 81 board_id sensor_count sequence payload... crc8(body) 5A
-    # The payload is LSB-first: bit 0 is local sensor 0. Sensors 0..N/2-1
+    # The payload packs two values per byte, low nibble first. Sensors 0..N/2-1
     # are mux A; sensors N/2..N-1 are mux B. Only the host polls; nodes never
     # transmit spontaneously, which prevents collisions on the shared RS-485 bus.
     sequence_number = 0
-    touch_states = [False] * SENSOR_COUNT
-    # Start with every pad untouched so each sensor gets an unpressed baseline.
-    baseline_values = [0] * SENSOR_COUNT
-    for channel in range(SENSORS_PER_MUX):
-        set_mux_channel(channel)
-        time.sleep(MUX_SETTLE_SECONDS * 2)  # Extra settle time for baseline
-        baseline_values[channel] = max(touch_inputs[0].raw_value, 1)
-        baseline_values[channel + SENSORS_PER_MUX] = max(touch_inputs[1].raw_value, 1)
+    sensor_values = [0] * SENSOR_COUNT
 
     # Flash the LED to signal the board is ready
     led.value = True

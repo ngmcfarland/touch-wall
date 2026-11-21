@@ -30,6 +30,7 @@ SOF: int = 0xA5
 EOF_MARKER: int = 0x5A
 POLL_COMMAND: int = 0x01
 STATE_COMMAND: int = 0x81
+NORMALIZED_VALUE_MAX: int = 15
 
 
 def crc8(data: Iterable[int]) -> int:
@@ -64,10 +65,10 @@ def pack_poll_request(board_id: int) -> bytes:
     return bytes((SOF,)) + body + bytes((crc8(body),))
 
 
-def unpack_state_payload(payload: bytes, sensor_count: int) -> List[bool]:
-    """Unpack a board payload into local sensor touched/not-touched states."""
+def unpack_state_payload(payload: bytes, sensor_count: int) -> List[int]:
+    """Unpack two 4-bit normalized sensor values from each payload byte."""
     return [
-        bool(payload[index // 8] & (1 << (index % 8)))
+        (payload[index // 2] >> (4 * (index % 2))) & NORMALIZED_VALUE_MAX
         for index in range(sensor_count)
     ]
 
@@ -76,10 +77,10 @@ def read_state_response(
     port: serial.Serial,
     expected_board_id: int,
     timeout: float,
-) -> Optional[Tuple[int, List[bool]]]:
+) -> Optional[Tuple[int, List[int]]]:
     """Read and validate one addressed board response, or return None on timeout."""
     sensor_count: int = expected_sensor_count(expected_board_id)
-    payload_size: int = (sensor_count + 7) // 8
+    payload_size: int = (sensor_count + 1) // 2
     frame_size: int = payload_size + 7
     buffer: bytearray = bytearray()
     deadline: float = time.monotonic() + timeout
@@ -123,30 +124,33 @@ class WallState:
 
     def __init__(self) -> None:
         """Create an empty state snapshot for the full wall and each board."""
-        self.states: List[bool] = [False] * TOTAL_SENSOR_COUNT
+        self.states: List[int] = [0] * TOTAL_SENSOR_COUNT
         self.initialized_boards: List[bool] = [False] * BOARD_COUNT
 
     def update_board(
         self,
         board_id: int,
-        local_states: Sequence[bool],
-    ) -> List[Tuple[int, bool]]:
+        local_states: Sequence[int],
+    ) -> List[Tuple[int, int]]:
         """Apply a board's sensor state and return every changed global sensor."""
         expected: int = expected_sensor_count(board_id)
         if len(local_states) != expected:
             raise ValueError(
                 f"board {board_id} reported {len(local_states)} sensors; expected {expected}"
             )
+        if any(
+            not 0 <= value <= NORMALIZED_VALUE_MAX for value in local_states
+        ):
+            raise ValueError("sensor values must be between 0 and 15")
 
         first_sensor: int = first_global_sensor(board_id)
         first_update: bool = not self.initialized_boards[board_id]
-        changed: List[Tuple[int, bool]] = []
-        for local_index, touched in enumerate(local_states):
+        changed: List[Tuple[int, int]] = []
+        for local_index, value in enumerate(local_states):
             global_index: int = first_sensor + local_index
-            touched = bool(touched)
-            if first_update or self.states[global_index] != touched:
-                changed.append((global_index, touched))
-            self.states[global_index] = touched
+            if first_update or self.states[global_index] != value:
+                changed.append((global_index, value))
+            self.states[global_index] = value
 
         self.initialized_boards[board_id] = True
         return changed
@@ -156,7 +160,7 @@ def poll_board(
     port: serial.Serial,
     board_id: int,
     response_timeout: float,
-) -> Optional[Tuple[int, List[bool]]]:
+) -> Optional[Tuple[int, List[int]]]:
     """Send a poll request to one board and return its decoded response."""
     request: bytes = pack_poll_request(board_id)
     written: int = port.write(request)  # type: ignore
@@ -211,13 +215,12 @@ def run(
                     )
                     continue
 
-                sequence, local_states = response
+                sequence, local_values = response
                 first_update: bool = not wall.initialized_boards[board_id]
-                changes: List[Tuple[int, bool]] = wall.update_board(
-                    board_id, local_states
+                changes: List[Tuple[int, int]] = wall.update_board(
+                    board_id, local_values
                 )
-                for sensor_index, touched in changes:
-                    value = 1 if touched else 0
+                for sensor_index, value in changes:
                     if send_osc:
                         osc_client.send_message(  # type: ignore[no-untyped-call]
                             f"/touch/{sensor_index}",
