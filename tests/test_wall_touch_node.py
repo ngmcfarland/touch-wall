@@ -1,3 +1,5 @@
+import importlib
+import os
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -36,6 +38,24 @@ class NodeTests(unittest.TestCase):
         node.sequence_number = 0
         node.sensor_values = [0] * node.SENSOR_COUNT
         node.request_buffer.clear()
+
+    def test_environment_variables_configure_node(self):
+        settings = {
+            "BOARD_ID": "7",
+            "SENSOR_COUNT": "10",
+            "MAX_TOUCH_DELTA": "30",
+        }
+        try:
+            with patch.dict(os.environ, settings):
+                importlib.reload(node)
+
+                self.assertEqual(node.BOARD_ID, 7)
+                self.assertEqual(node.SENSOR_COUNT, 10)
+                self.assertEqual(node.MAX_TOUCH_DELTA, 30)
+                self.assertEqual(node.PAYLOAD_SIZE, 5)
+                self.assertEqual(node.normalize_raw_value(70, 100), 15)
+        finally:
+            importlib.reload(node)
 
     def test_normalize_raw_values_clamps_and_scales_from_baseline(self):
         baseline = 1000

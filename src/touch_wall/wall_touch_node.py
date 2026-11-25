@@ -1,11 +1,12 @@
+import os
 import time
 
 
-BOARD_ID = 0
-SENSOR_COUNT = 24
+BOARD_ID = int(os.getenv("BOARD_ID", "0"))
+SENSOR_COUNT = int(os.getenv("SENSOR_COUNT", "24"))
+MAX_TOUCH_DELTA = int(os.getenv("MAX_TOUCH_DELTA", "60"))
 
 NORMALIZED_VALUE_MAX = 15
-MAX_TOUCH_DELTA = 60
 
 UART_BAUDRATE = 115200
 # RS-485 breakout's RTS polarity: true means GP2 high while transmitting.
@@ -24,6 +25,8 @@ if not 0 <= BOARD_ID <= 23:
     raise ValueError("BOARD_ID must be between 0 and 23")
 if SENSOR_COUNT < 1 or SENSOR_COUNT > 24:
     raise ValueError("SENSOR_COUNT must be between 1 and 24")
+if MAX_TOUCH_DELTA < 1:
+    raise ValueError("MAX_TOUCH_DELTA must be greater than 0")
 
 
 def crc8(data: bytes | bytearray | tuple[int, ...]) -> int:

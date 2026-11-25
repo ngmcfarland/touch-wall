@@ -40,6 +40,27 @@ uv run python src/touch_wall/wall_touch_receiver.py
 
 The port can also be supplied directly with `--port`.
 
+## Configuring the CircuitPython node
+
+The node reads `BOARD_ID`, `SENSOR_COUNT`, and `MAX_TOUCH_DELTA` from the
+microcontroller's root-level `settings.toml`. The MPR121 driver reads
+`MPR121_CONFIG1` and `MPR121_CONFIG2` from the same file. Values are read as
+strings and converted to integers; the MPR121 configuration values accept
+decimal or `0x`-prefixed hexadecimal.
+
+For example:
+
+```toml
+BOARD_ID = "0"
+SENSOR_COUNT = "24"
+MAX_TOUCH_DELTA = "60"
+MPR121_CONFIG1 = "0x30"
+MPR121_CONFIG2 = "0x3A"
+```
+
+These are the defaults, so only settings that need to differ must be added.
+The receiver continues to read its settings from the computer's `.env` file.
+
 The node's hardware modules are imported inside `main()`, so its reusable logic
 can be imported by desktop tests. On the board, deploy `wall_touch_node.py` as
 the CircuitPython entry point (typically `code.py`) and deploy
