@@ -31,19 +31,19 @@ class FakeUART:
 
 class NodeTests(unittest.TestCase):
     def setUp(self):
-        node.select_pins = [FakePin() for _ in range(4)]
         node.rs485_direction = FakePin()
         node.uart = FakeUART()
         node.sequence_number = 0
         node.sensor_values = [0] * node.SENSOR_COUNT
         node.request_buffer.clear()
 
-    def test_normalize_raw_values_clamps_and_scales(self):
-        self.assertEqual(node.normalize_raw_value(1000), 0)
-        self.assertEqual(node.normalize_raw_value(2000), 0)
-        self.assertEqual(node.normalize_raw_value(6000), 8)
-        self.assertEqual(node.normalize_raw_value(10000), 15)
-        self.assertEqual(node.normalize_raw_value(12000), 15)
+    def test_normalize_raw_values_clamps_and_scales_from_baseline(self):
+        baseline = 1000
+        self.assertEqual(node.normalize_raw_value(baseline + 2, baseline), 0)
+        self.assertEqual(node.normalize_raw_value(baseline, baseline), 0)
+        self.assertEqual(node.normalize_raw_value(baseline - 30, baseline), 8)
+        self.assertEqual(node.normalize_raw_value(baseline - 60, baseline), 15)
+        self.assertEqual(node.normalize_raw_value(baseline - 100, baseline), 15)
 
     def test_crc_and_sensor_value_packing(self):
         self.assertEqual(node.crc8(b"123456789"), 0xF4)
@@ -61,46 +61,41 @@ class NodeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             node.pack_values([16] + [0] * (node.SENSOR_COUNT - 1))
 
-    def test_mux_channel_selects_address_bits(self):
-        node.set_mux_channel(0b1010)
+    def test_handle_loop_reads_both_mpr121_boards_and_services_uart(self):
+        board_a = Mock()
+        board_a.filtered_data.side_effect = lambda pin: 100 - pin * 5
+        board_a.baseline_data.return_value = 100
+        board_b = Mock()
+        board_b.filtered_data.side_effect = lambda pin: 100 - pin * 10
+        board_b.baseline_data.return_value = 100
+        node.touch_inputs = (board_a, board_b)
 
-        self.assertEqual(
-            [pin.value for pin in node.select_pins], [False, True, False, True]
-        )
-
-    def test_handle_loop_reads_both_muxes_and_services_uart_per_channel(self):
-        node.touch_inputs = (Mock(raw_value=120), Mock(raw_value=90))
-        update = Mock()
-        with (
-            patch.object(node, "set_mux_channel") as set_channel,
-            patch.object(node, "update_sensor_value_for_index", update),
-            patch.object(node, "service_uart") as service_uart,
-            patch.object(node.time, "sleep") as sleep,
-        ):
+        with patch.object(node, "service_uart") as service_uart:
             node.handle_loop()
 
         self.assertEqual(
-            set_channel.call_args_list,
-            [call(channel) for channel in range(node.SENSORS_PER_MUX)],
+            board_a.filtered_data.call_args_list,
+            [call(pin=pin) for pin in range(12)],
         )
         self.assertEqual(
-            update.call_args_list,
-            [
-                expected_call
-                for channel in range(node.SENSORS_PER_MUX)
-                for expected_call in (
-                    call(raw_value=120, idx=channel),
-                    call(raw_value=90, idx=channel + node.SENSORS_PER_MUX),
-                )
-            ],
+            board_a.baseline_data.call_args_list,
+            [call(pin=pin) for pin in range(12)],
         )
-        self.assertEqual(service_uart.call_count, node.SENSORS_PER_MUX)
-        self.assertEqual(sleep.call_count, node.SENSORS_PER_MUX)
-        sleep.assert_called_with(node.MUX_SETTLE_SECONDS)
-
-    def test_sensor_value_updates_without_thresholding(self):
-        node.update_sensor_value_for_index(raw_value=10000, idx=0)
-        self.assertEqual(node.sensor_values[0], 15)
+        self.assertEqual(
+            board_b.filtered_data.call_args_list,
+            [call(pin=pin) for pin in range(12)],
+        )
+        self.assertEqual(
+            board_b.baseline_data.call_args_list,
+            [call(pin=pin) for pin in range(12)],
+        )
+        self.assertEqual(
+            node.sensor_values[:12], [0, 1, 3, 4, 5, 6, 8, 9, 10, 11, 13, 14]
+        )
+        self.assertEqual(
+            node.sensor_values[12:], [0, 3, 5, 8, 10, 13, 15, 15, 15, 15, 15, 15]
+        )
+        self.assertEqual(service_uart.call_count, node.SENSOR_COUNT)
 
     def test_send_state_frame_and_sequence_wrap(self):
         node.sequence_number = 255

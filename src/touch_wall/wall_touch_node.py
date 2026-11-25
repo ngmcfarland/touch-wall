@@ -2,15 +2,13 @@ import time
 
 
 BOARD_ID = 0
-SENSOR_COUNT = 24  # Half on one MUX and half on the other
+SENSOR_COUNT = 24
 
-RAW_VALUE_MIN = 2000
-RAW_VALUE_MAX = 10000
 NORMALIZED_VALUE_MAX = 15
-MUX_SETTLE_SECONDS = 0.005
+MAX_TOUCH_DELTA = 60
 
 UART_BAUDRATE = 115200
-# Confirm the breakout's RTS polarity; true means GP2 high while transmitting.
+# RS-485 breakout's RTS polarity: true means GP2 high while transmitting.
 RS485_TX_ENABLE_LEVEL = True
 UART_BITS_PER_BYTE = 10  # 8 data bits, start bit, and stop bit
 TX_TURNAROUND_MARGIN_SECONDS = 0.001
@@ -20,23 +18,16 @@ EOF_MARKER = 0x5A
 POLL_COMMAND = 0x01
 STATE_COMMAND = 0x81
 
-SENSORS_PER_MUX = SENSOR_COUNT // 2
 PAYLOAD_SIZE = (SENSOR_COUNT + 1) // 2
 
 if not 0 <= BOARD_ID <= 23:
     raise ValueError("BOARD_ID must be between 0 and 23")
-if SENSOR_COUNT < 2 or SENSOR_COUNT > 32 or SENSOR_COUNT % 2:
-    raise ValueError("SENSOR_COUNT must be even and between 2 and 32")
+if SENSOR_COUNT < 1 or SENSOR_COUNT > 24:
+    raise ValueError("SENSOR_COUNT must be between 1 and 24")
 
 
-def set_mux_channel(channel):
-    select_pins[0].value = bool(channel & 0x01)
-    select_pins[1].value = bool(channel & 0x02)
-    select_pins[2].value = bool(channel & 0x04)
-    select_pins[3].value = bool(channel & 0x08)
-
-
-def crc8(data):
+def crc8(data: bytes | bytearray | tuple[int, ...]) -> int:
+    """Compute a CRC-8/ATM checksum (polynomial 0x07, initial value 0)."""
     crc = 0
     for value in data:
         crc ^= value
@@ -48,24 +39,41 @@ def crc8(data):
     return crc
 
 
-def normalize_raw_value(raw_value):
-    clamped_value = min(max(raw_value, RAW_VALUE_MIN), RAW_VALUE_MAX)
-    raw_range = RAW_VALUE_MAX - RAW_VALUE_MIN
+def normalize_raw_value(raw_value: int, baseline: int) -> int:
+    """ Normalize the raw value based on the baseline recorded by the MPR121 board.
+
+    When not touched, there is typically a jitter of +/- 2.
+    When touched, the raw value drops below the baseline by some delta.
+    Find the unsigned difference between the raw value and baseline
+    and normalize that using the MAX_TOUCH_DELTA to be between 0 and
+    the NORMALIZED_VALUE_MAX value.
+
+    Args:
+        raw_value: The current reading from the MPR121 pin
+        baseline: The baseline recorded by the MPR121 on initialization
+
+    Returns:
+        A normalized value between 0 and NORMALIZED_VALUE_MAX
+    """
+    touch_delta = baseline - raw_value
+    clamped_value = min(max(touch_delta, 0), MAX_TOUCH_DELTA)
     return (
-        (clamped_value - RAW_VALUE_MIN) * NORMALIZED_VALUE_MAX + raw_range // 2
-    ) // raw_range
+        clamped_value * NORMALIZED_VALUE_MAX + MAX_TOUCH_DELTA // 2
+    ) // MAX_TOUCH_DELTA
 
 
-def pack_values(values):
+def pack_values(values: list[int]) -> bytearray:
+    """ Pack the list of integers into a bytearray to be sent over RS-485. """
     payload = bytearray(PAYLOAD_SIZE)
     for sensor_index, value in enumerate(values):
         if not 0 <= value <= NORMALIZED_VALUE_MAX:
-            raise ValueError("sensor values must be between 0 and 15")
+            raise ValueError(f"sensor values must be between 0 and {NORMALIZED_VALUE_MAX}")
         payload[sensor_index // 2] |= value << (4 * (sensor_index % 2))
     return payload
 
 
-def send_state():
+def send_state() -> None:
+    """ Send the full state of all touch spots over the RS-485 bus. """
     global sequence_number
 
     body = bytearray((STATE_COMMAND, BOARD_ID, SENSOR_COUNT, sequence_number))
@@ -89,7 +97,12 @@ def send_state():
 request_buffer = bytearray()
 
 
-def handle_request_byte(value):
+def handle_request_byte(value: int) -> None:
+    """ Parse the incoming RS-485 message to determine if and how to respond.
+
+    Args:
+        value: The latest int value from the RS-485 stream
+    """
     global request_buffer
     request_buffer.append(value)
     while len(request_buffer) >= 4:
@@ -108,42 +121,35 @@ def handle_request_byte(value):
             send_state()
 
 
-def service_uart():
+def service_uart() -> None:
+    """ Read from UART and handle the incoming values if found. """
     while uart.in_waiting:
-        received = uart.read(1)
+        received: bytes | None = uart.read(1)
         if received:
             handle_request_byte(received[0])
 
 
-def update_sensor_value_for_index(raw_value, idx):
-    sensor_values[idx] = normalize_raw_value(raw_value)
-
-
 def handle_loop() -> None:
-    for channel in range(SENSORS_PER_MUX):
-        set_mux_channel(channel)
-        time.sleep(MUX_SETTLE_SECONDS)
-        # Read and update the normalized values for both MUX inputs
-        update_sensor_value_for_index(
-            raw_value=touch_inputs[0].raw_value,
-            idx=channel,
-        )
-        update_sensor_value_for_index(
-            raw_value=touch_inputs[1].raw_value,
-            idx=channel + SENSORS_PER_MUX,
+    """ Loop through the channels and update each with new values while continuously checking for RS-485 messages. """
+    for channel in range(SENSOR_COUNT):
+        touch_input = touch_inputs[0] if channel < 12 else touch_inputs[1]
+        # Read and update the normalized value from MPR121 board
+        sensor_values[channel] = normalize_raw_value(
+            raw_value=touch_input.filtered_data(pin=channel % 12),
+            baseline=touch_input.baseline_data(pin=channel % 12),
         )
         # Check for RS-485 message
         service_uart()
 
 
 def main():
+    # Imports done here to allow for unit tests on computers
+    from digitalio import DigitalInOut, Direction
+    from mpr121_custom import MPR121
     import board
-    import touchio
-    from digitalio import DigitalInOut, Direction, Pull
-    import adafruit_pio_uart
+    import busio
 
     global rs485_direction
-    global select_pins
     global sequence_number
     global touch_inputs
     global sensor_values
@@ -152,36 +158,28 @@ def main():
     led = DigitalInOut(board.LED)
     led.direction = Direction.OUTPUT
 
-    # Both multiplexers share their address/select lines.
-    select_pins = [
-        DigitalInOut(board.GP6),
-        DigitalInOut(board.GP7),
-        DigitalInOut(board.GP8),
-        DigitalInOut(board.GP9),
-    ]
-    for pin in select_pins:
-        pin.direction = Direction.OUTPUT
-
     rs485_direction = DigitalInOut(board.GP2)
     rs485_direction.direction = Direction.OUTPUT
     rs485_direction.value = not RS485_TX_ENABLE_LEVEL
 
-    touch_a = touchio.TouchIn(board.GP10, pull=Pull.UP)
-    touch_b = touchio.TouchIn(board.GP11, pull=Pull.UP)
-    touch_inputs = (touch_a, touch_b)
+    i2c = busio.I2C(board.GP5, board.GP4)
+    mpr121_a = MPR121(i2c, 0x5A)  # Default address, no modifications to MPR121 breakout board
+    mpr121_b = MPR121(i2c, 0x5B)  # Cut trace between ADDR and GND, connect ADDR to 3.3V
 
-    uart = adafruit_pio_uart.UART(
-        tx=board.GP1,
-        rx=board.GP0,
+    touch_inputs = (mpr121_a, mpr121_b)
+
+    uart = busio.UART(
+        tx=board.GP0,
+        rx=board.GP1,
         baudrate=UART_BAUDRATE,
         timeout=0,
     )
 
     # Request:  A5 01 board_id crc8(command, board_id)
     # Response: A5 81 board_id sensor_count sequence payload... crc8(body) 5A
-    # The payload packs two values per byte, low nibble first. Sensors 0..N/2-1
-    # are mux A; sensors N/2..N-1 are mux B. Only the host polls; nodes never
-    # transmit spontaneously, which prevents collisions on the shared RS-485 bus.
+    # The payload packs two values per byte, low nibble first. Sensors 0..11
+    # are MPR121 A; sensors 12..23 are MPR121 B. Only the host polls; nodes
+    # never transmit spontaneously, which prevents collisions on the RS-485 bus.
     sequence_number = 0
     sensor_values = [0] * SENSOR_COUNT
 
