@@ -29,6 +29,7 @@ Implementation Notes
 * Adafruit's Bus Device library: https://github.com/adafruit/Adafruit_CircuitPython_BusDevice
 """
 
+import os
 import time
 
 try:
@@ -67,8 +68,14 @@ MPR121_FDLT = const(0x35)
 MPR121_TOUCHTH_0 = const(0x41)
 MPR121_RELEASETH_0 = const(0x42)
 MPR121_DEBOUNCE = const(0x5B)
-MPR121_CONFIG1 = const(0x5C)
-MPR121_CONFIG2 = const(0x5D)
+MPR121_CONFIG1_REGISTER = const(0x5C)
+MPR121_CONFIG2_REGISTER = const(0x5D)
+MPR121_CONFIG1 = int(os.getenv("MPR121_CONFIG1", "0x30"), 0)
+MPR121_CONFIG2 = int(os.getenv("MPR121_CONFIG2", "0x3A"), 0)
+if not 0 <= MPR121_CONFIG1 <= 0xFF:
+    raise ValueError("MPR121_CONFIG1 must be between 0 and 255")
+if not 0 <= MPR121_CONFIG2 <= 0xFF:
+    raise ValueError("MPR121_CONFIG2 must be between 0 and 255")
 # MPR121_CHARGECURR_0    = const(0x5F)
 # MPR121_CHARGETIME_1    = const(0x6C)
 MPR121_ECR = const(0x5E)
@@ -208,7 +215,7 @@ class MPR121:
         self._write_register_byte(MPR121_ECR, 0x00)
 
         # Check CDT, SFI, ESI configuration is at default values.
-        self._read_register_bytes(MPR121_CONFIG2, self._buffer, 1)
+        self._read_register_bytes(MPR121_CONFIG2_REGISTER, self._buffer, 1)
         if self._buffer[0] != 0x24:
             raise RuntimeError("Failed to find MPR121 in expected config state!")
 
@@ -232,10 +239,10 @@ class MPR121:
 
         # Set other configuration registers.
         self._write_register_byte(MPR121_DEBOUNCE, 0)
-        # self._write_register_byte(MPR121_CONFIG1, 0x10)  # default, 16uA charge current
-        # self._write_register_byte(MPR121_CONFIG2, 0x20)  # 0.5uS encoding, 1ms period
-        self._write_register_byte(MPR121_CONFIG1, 0x30)  # 48uA charge current
-        self._write_register_byte(MPR121_CONFIG2, 0x3A)  # 0.5us encoding, 18 samples, 4ms period
+        # self._write_register_byte(MPR121_CONFIG1_REGISTER, 0x10)  # default, 16uA charge current
+        # self._write_register_byte(MPR121_CONFIG2_REGISTER, 0x20)  # 0.5uS encoding, 1ms period
+        self._write_register_byte(MPR121_CONFIG1_REGISTER, MPR121_CONFIG1)
+        self._write_register_byte(MPR121_CONFIG2_REGISTER, MPR121_CONFIG2)
 
         # Enable all electrodes.
         self._write_register_byte(MPR121_ECR, 0x8F)  # start with first 5 bits of baseline tracking
