@@ -42,5 +42,13 @@ The port can also be supplied directly with `--port`.
 
 The node's hardware modules are imported inside `main()`, so its reusable logic
 can be imported by desktop tests. On the board, deploy `wall_touch_node.py` as
-the CircuitPython entry point (typically `code.py`) to initialize the hardware
-and start the polling loop.
+the CircuitPython entry point (typically `code.py`) and deploy
+`mpr121_custom.py` alongside it (or in `lib/`). Install the
+`adafruit_bus_device` CircuitPython library with Circup from the repository
+root:
+
+```sh
+uv run circup install adafruit_bus_device
+```
+
+These files initialize the hardware and start the polling loop.
